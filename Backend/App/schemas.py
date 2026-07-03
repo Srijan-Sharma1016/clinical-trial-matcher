@@ -361,7 +361,9 @@ class ProfileAnalysisResponse(BaseModel):
     )
     trial_matches: Optional[TrialMatchResult] = None
 
-
+class ManualProfileRequest(BaseModel):
+    """Request model for manual patient profile entry."""
+    profile: PatientProfile
 class ChatRequest(BaseModel):
     """Request model for the chat endpoint."""
     session_id: Optional[str] = None
