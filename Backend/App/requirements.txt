@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+sqlmodel
+sqlalchemy
+psycopg2-binary
+pymupdf
+instructor
+groq
+langchain-core
+langchain-groq
+langgraph
+httpx
+python-dotenv
+python-multipart
+pydantic
