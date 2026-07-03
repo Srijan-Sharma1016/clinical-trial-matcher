@@ -5,9 +5,16 @@ Responsibility: Persist agent conversation memory in Redis.
 Depends on: memory/base_memory.py, config/settings.py
 """
 
+from __future__ import annotations
+
 import logging
 import pickle
 from typing import Any, Optional
+
+try:
+    import redis.asyncio as aioredis
+except ImportError:  # fallback for environments without redis.asyncio
+    import redis as aioredis
 
 # import redis.asyncio as aioredis
 
