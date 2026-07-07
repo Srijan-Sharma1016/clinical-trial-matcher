@@ -1,12 +1,17 @@
 # schemas.py
 """
 Pydantic schema definitions.
-Responsibility: Data contracts for patient profiles, trial data, and API responses.
+Responsibility: Data contracts for patient profiles,
+trial data, and API responses.
 """
 
 from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+
+# -----------------------------------------------------------
+# SHARED UTILITIES
+# -----------------------------------------------------------
 
 _PLACEHOLDER_STRINGS = {
     "",
@@ -20,7 +25,10 @@ _PLACEHOLDER_STRINGS = {
 
 
 def _normalize_optional_string(value: Any) -> Optional[str]:
-    """Convert blank/placeholder strings to None, otherwise strip whitespace."""
+    """
+    Convert blank/placeholder strings to None,
+    otherwise strip whitespace.
+    """
     if value is None:
         return None
     if isinstance(value, str):
@@ -32,34 +40,41 @@ def _normalize_optional_string(value: Any) -> Optional[str]:
 
 
 def _clean_string_list(value: Any) -> List[str]:
-    """Normalize string lists, remove blanks/placeholders, preserve order, de-duplicate."""
+    """
+    Normalize string lists — remove blanks/placeholders,
+    preserve order, de-duplicate.
+    Handles comma-separated strings AND proper arrays.
+    """
     if value is None:
         return []
 
     if isinstance(value, str):
-        raw_items = [value]
+        # Split "EGFR, ALK, PD-L1" → ["EGFR", "ALK", "PD-L1"]
+        raw_items = [item.strip() for item in value.split(",")]
     elif isinstance(value, (list, tuple, set)):
         raw_items = list(value)
     else:
         raw_items = [value]
 
     cleaned_items: List[str] = []
-    seen = set()
+    seen: set = set()
 
     for item in raw_items:
         if item is None:
             continue
-
         item_str = str(item).strip()
         if not item_str or item_str.lower() in _PLACEHOLDER_STRINGS:
             continue
-
         if item_str not in seen:
             seen.add(item_str)
             cleaned_items.append(item_str)
 
     return cleaned_items
 
+
+# -----------------------------------------------------------
+# PATIENT PROFILE
+# -----------------------------------------------------------
 
 class PatientProfile(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
@@ -80,17 +95,38 @@ class PatientProfile(BaseModel):
             return None
         if isinstance(v, str):
             cleaned = v.strip()
-            if cleaned.lower() in _PLACEHOLDER_STRINGS:
+
+            # Empty or placeholder → None (no error)
+            if cleaned == "" or cleaned.lower() in _PLACEHOLDER_STRINGS:
                 return None
+
+            # Try integer parse first
             if cleaned.isdigit():
                 return int(cleaned)
+
+            # Try float string like "62.0"
+            try:
+                parsed = int(float(cleaned))
+                return parsed
+            except (ValueError, TypeError):
+                raise ValueError(
+                    f"'{cleaned}' is not a valid age. "
+                    f"Please enter a number between 1 and 120."
+                )
+
+        if isinstance(v, float):
+            return int(v)
+
         return v
 
     @field_validator("age")
     @classmethod
     def validate_age(cls, v):
         if v is not None and (v <= 0 or v > 120):
-            raise ValueError(f"Age must be between 1 and 120, got {v}")
+            raise ValueError(
+                f"Age {v} is not valid. "
+                f"Please enter a value between 1 and 120."
+            )
         return v
 
     @field_validator(
@@ -105,11 +141,19 @@ class PatientProfile(BaseModel):
     def normalize_optional_strings(cls, v):
         return _normalize_optional_string(v)
 
-    @field_validator("biomarkers", "previous_treatments", mode="before")
+    @field_validator(
+        "biomarkers",
+        "previous_treatments",
+        mode="before",
+    )
     @classmethod
     def clean_string_lists(cls, v):
         return _clean_string_list(v)
 
+
+# -----------------------------------------------------------
+# TRIAL LOCATION
+# -----------------------------------------------------------
 
 class TrialLocation(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
@@ -128,7 +172,9 @@ class TrialLocation(BaseModel):
     def __str__(self) -> str:
         parts = [self.facility, self.city, self.country]
         return ", ".join(p for p in parts if p)
-
+# -----------------------------------------------------------
+# TRIAL ELIGIBILITY
+# -----------------------------------------------------------
 
 class TrialEligibility(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
@@ -170,11 +216,17 @@ class TrialEligibility(BaseModel):
         return _clean_string_list(v)
 
 
+# -----------------------------------------------------------
+# TRIAL SCORING SIGNALS
+# -----------------------------------------------------------
+
 class TrialScoringSignals(BaseModel):
     """
-    Structured signals extracted from a TrialProfile's eligibility criteria.
-    Used by scoring.py for data-driven comparison instead of hardcoded keyword scanning.
-    Extracted at Node 2 (search_trials) via extract_trial_scoring_signals().
+    Structured signals extracted from a TrialProfile's
+    eligibility criteria. Used by scoring.py for
+    data-driven comparison instead of hardcoded
+    keyword scanning. Extracted at Node 2 (search_trials)
+    via extract_trial_scoring_signals().
     """
     model_config = ConfigDict(str_strip_whitespace=True)
 
@@ -192,7 +244,6 @@ class TrialScoringSignals(BaseModel):
             "(e.g. ['HER2-positive'])"
         ),
     )
-
     excluded_treatments: List[str] = Field(
         default_factory=list,
         description=(
@@ -217,10 +268,10 @@ class TrialScoringSignals(BaseModel):
     requires_treatment_naive: bool = Field(
         default=False,
         description=(
-            "True if trial explicitly requires untreated / treatment-naive patients"
+            "True if trial explicitly requires "
+            "untreated / treatment-naive patients"
         ),
     )
-
     target_setting: str = Field(
         default="unknown",
         description=(
@@ -228,15 +279,13 @@ class TrialScoringSignals(BaseModel):
             "'early' | 'locally_advanced' | 'advanced' | 'unknown'"
         ),
     )
-
     required_cancer_types: List[str] = Field(
         default_factory=list,
         description=(
-            "Normalized cancer type terms extracted from trial title, "
-            "conditions, and eligibility text"
+            "Normalized cancer type terms extracted from "
+            "trial title, conditions, and eligibility text"
         ),
     )
-
     trial_phase: Optional[str] = Field(
         default=None,
         description=(
@@ -279,9 +328,15 @@ class TrialScoringSignals(BaseModel):
     @classmethod
     def validate_prior_lines(cls, v):
         if v is not None and v < 0:
-            raise ValueError("Prior treatment line counts cannot be negative.")
+            raise ValueError(
+                "Prior treatment line counts cannot be negative."
+            )
         return v
 
+
+# -----------------------------------------------------------
+# TRIAL PROFILE
+# -----------------------------------------------------------
 
 class TrialProfile(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
@@ -295,13 +350,16 @@ class TrialProfile(BaseModel):
     conditions: List[str] = Field(default_factory=list)
     brief_summary: Optional[str] = None
     detailed_description: Optional[str] = None
-    eligibility: TrialEligibility = Field(default_factory=TrialEligibility)
+    eligibility: TrialEligibility = Field(
+        default_factory=TrialEligibility
+    )
     locations: List[TrialLocation] = Field(default_factory=list)
     sponsor_name: Optional[str] = None
     sponsor_class: Optional[str] = None
     mesh_terms: List[str] = Field(default_factory=list)
     has_results: bool = False
 
+    # Pre-computed scoring signals — populated at Node 2
     scoring_signals: Optional[TrialScoringSignals] = Field(
         default=None,
         description=(
@@ -332,16 +390,25 @@ class TrialProfile(BaseModel):
     def normalize_optional_strings(cls, v):
         return _normalize_optional_string(v)
 
-    @field_validator("phases", "conditions", "mesh_terms", mode="before")
+    @field_validator(
+        "phases", "conditions", "mesh_terms",
+        mode="before",
+    )
     @classmethod
     def clean_string_lists(cls, v):
         return _clean_string_list(v)
 
 
+# -----------------------------------------------------------
+# TRIAL MATCH RESULT
+# -----------------------------------------------------------
+
 class TrialMatchResult(BaseModel):
     """Structured result from the trial matching workflow."""
     final_recommendations: str = ""
-    eligibility_results: List[Dict[str, Any]] = Field(default_factory=list)
+    eligibility_results: List[Dict[str, Any]] = Field(
+        default_factory=list
+    )
     trials: List[Dict[str, Any]] = Field(default_factory=list)
     trial_count: int = 0
     cancer_type: str = ""
@@ -349,21 +416,65 @@ class TrialMatchResult(BaseModel):
     error: Optional[str] = None
 
 
+# -----------------------------------------------------------
+# PROFILE ANALYSIS RESPONSE
+# -----------------------------------------------------------
+
 class ProfileAnalysisResponse(BaseModel):
     profile: PatientProfile
-    status: Literal["PROFILE_READY", "NEEDS_CLARIFICATION", "MATCHING_FAILED"]
+    status: Literal[
+        "PROFILE_READY",
+        "NEEDS_CLARIFICATION",
+        "MATCHING_FAILED",
+    ]
     is_complete: bool
     missing_fields: List[str] = Field(default_factory=list)
     improvement_suggestions: List[str] = Field(default_factory=list)
     agent_suggestions: List[str] = Field(
         default_factory=list,
-        description="Deprecated compatibility field. Prefer improvement_suggestions.",
+        description=(
+            "Deprecated compatibility field. "
+            "Prefer improvement_suggestions."
+        ),
     )
     trial_matches: Optional[TrialMatchResult] = None
 
+
+# -----------------------------------------------------------
+# MANUAL PROFILE REQUEST
+# -----------------------------------------------------------
+
 class ManualProfileRequest(BaseModel):
-    """Request model for manual patient profile entry."""
+    """
+    Request model for manual patient profile entry.
+
+    Frontend sends:
+    {
+        "profile": {
+            "age": 62,
+            "gender": "Male",
+            "cancer_type": "Non-Small Cell Lung Cancer",
+            "cancer_stage": "Stage IV",
+            "biomarkers": ["EGFR", "PD-L1"],
+            "previous_treatments": ["Carboplatin"],
+            "country": "India",
+            "diagnosis": null
+        }
+    }
+
+    Notes:
+    - age must be integer between 1 and 120
+    - empty optional fields must be null not ""
+    - biomarkers and previous_treatments accept
+      arrays OR comma-separated strings
+    """
     profile: PatientProfile
+
+
+# -----------------------------------------------------------
+# CHAT REQUEST / RESPONSE
+# -----------------------------------------------------------
+
 class ChatRequest(BaseModel):
     """Request model for the chat endpoint."""
     session_id: Optional[str] = None

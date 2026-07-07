@@ -9,6 +9,9 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from starlette.requests import Request
 from starlette.concurrency import run_in_threadpool
 
 import fitz  # PyMuPDF
@@ -26,7 +29,7 @@ from schemas import (
 from agents.oncology_agent import OncologyAgent
 from core.entrypoint import run_trial_matching
 from core.completeness import (
-    get_missing_fields_in_order,    
+    get_missing_fields_in_order,
     build_improvement_suggestions,
 )
 from database import init_db, check_db_connection
@@ -69,7 +72,8 @@ async def lifespan(app: FastAPI):
     db_healthy = check_db_connection()
     if not db_healthy:
         logger.warning(
-            "⚠️ Database unreachable on startup — DB features will be skipped."
+            "⚠️ Database unreachable on startup — "
+            "DB features will be skipped."
         )
     else:
         logger.info("✅ Database connection verified.")
@@ -78,7 +82,6 @@ async def lifespan(app: FastAPI):
 
     logger.info("✅ Application startup complete.")
     yield
-
     logger.info("Application shutting down. Goodbye!")
 
 
@@ -108,18 +111,47 @@ app.add_middleware(
 )
 
 # -----------------------------------------------------------
+# VALIDATION ERROR HANDLER
+# Surfaces exact 422 field errors in logs + response
+# -----------------------------------------------------------
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(
+    request: Request,
+    exc: RequestValidationError,
+) -> JSONResponse:
+    """
+    Catches Pydantic 422 validation errors and logs
+    the exact failing fields for easy debugging.
+    """
+    logger.error(
+        "422 Validation Error | url=%s | errors=%s",
+        request.url,
+        exc.errors(),
+    )
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": exc.errors(),
+            "hint": (
+                "Check that all required fields are correct types. "
+                "age must be integer 1-120, "
+                "empty optional fields must be null not empty string."
+            ),
+        },
+    )
+
+
+# -----------------------------------------------------------
 # HELPERS
 # -----------------------------------------------------------
 
-def _build_profile_analysis_response(profile: PatientProfile) -> ProfileAnalysisResponse:
+def _build_profile_analysis_response(
+    profile: PatientProfile,
+) -> ProfileAnalysisResponse:
     """
-    Builds a consistent analysis response with ordered missing fields
-    and user-facing improvement suggestions.
-
-    Matching readiness rule:
-    - cancer_type is required to proceed with trial matching
-    - other missing fields do not block matching, but they reduce completeness
-      and trigger suggestions
+    Builds a consistent analysis response with ordered missing
+    fields and user-facing improvement suggestions.
     """
     missing_fields = get_missing_fields_in_order(profile)
     improvement_suggestions = build_improvement_suggestions(missing_fields)
@@ -136,7 +168,7 @@ def _build_profile_analysis_response(profile: PatientProfile) -> ProfileAnalysis
         is_complete=is_complete,
         missing_fields=missing_fields,
         improvement_suggestions=improvement_suggestions,
-        agent_suggestions=improvement_suggestions,  # backward compatibility
+        agent_suggestions=improvement_suggestions,
         trial_matches=None,
     )
 
@@ -151,11 +183,17 @@ def _coerce_trial_match_result(
 
     if isinstance(match_result, dict):
         return TrialMatchResult(
-            final_recommendations=match_result.get("final_recommendations", ""),
-            eligibility_results=match_result.get("eligibility_results", []),
+            final_recommendations=match_result.get(
+                "final_recommendations", ""
+            ),
+            eligibility_results=match_result.get(
+                "eligibility_results", []
+            ),
             trials=match_result.get("trials", []),
             trial_count=match_result.get("trial_count", 0),
-            cancer_type=match_result.get("cancer_type", cancer_type or ""),
+            cancer_type=match_result.get(
+                "cancer_type", cancer_type or ""
+            ),
             success=match_result.get("success", True),
             error=match_result.get("error"),
         )
@@ -178,7 +216,9 @@ def _extract_text_from_pdf_bytes(file_bytes: bytes) -> str:
     """
     doc = fitz.open(stream=file_bytes, filetype="pdf")
     try:
-        return "\n".join(page.get_text() for page in doc).strip()
+        return "\n".join(
+            page.get_text() for page in doc
+        ).strip()
     finally:
         doc.close()
 
@@ -190,7 +230,8 @@ def _build_extraction_messages(extracted_text: str) -> list:
             "role": "system",
             "content": (
                 "You are an expert clinical data extraction AI. "
-                "Extract the patient profile strictly into the provided JSON schema. "
+                "Extract the patient profile strictly into the "
+                "provided JSON schema. "
                 "If a field is missing, return null or an empty array. "
                 "Do not guess. Do not hallucinate. "
                 "Only use information explicitly present in the text."
@@ -198,7 +239,10 @@ def _build_extraction_messages(extracted_text: str) -> list:
         },
         {
             "role": "user",
-            "content": f"Extract the medical data from this text:\n\n{extracted_text}",
+            "content": (
+                f"Extract the medical data from this text:"
+                f"\n\n{extracted_text}"
+            ),
         },
     ]
 
@@ -207,18 +251,23 @@ async def _run_matching_if_possible(
     analysis_result: ProfileAnalysisResponse,
 ) -> ProfileAnalysisResponse:
     """
-    Runs the trial-matching pipeline only when cancer_type is present.
-    If matching fails, preserves the profile and suggestions.
+    Runs the trial-matching pipeline only when
+    cancer_type is present. If matching fails,
+    preserves the profile and suggestions.
     """
     if analysis_result.status != "PROFILE_READY":
         logger.warning(
-            "Profile not ready for matching. Missing required fields: %s",
+            "Profile not ready for matching. "
+            "Missing required fields: %s",
             analysis_result.missing_fields,
         )
         return analysis_result
 
     try:
-        logger.info("Profile ready. Routing to Clinical Matcher Agent...")
+        logger.info(
+            "Profile ready. Routing to Clinical Matcher Agent..."
+        )
+        # Always pass dict to run_trial_matching
         patient_dict = analysis_result.profile.model_dump()
         match_result = await run_trial_matching(patient_dict)
 
@@ -236,7 +285,10 @@ async def _run_matching_if_possible(
         return analysis_result
 
     except Exception:
-        logger.exception("Trial matching failed — returning profile without matches.")
+        logger.exception(
+            "Trial matching failed — "
+            "returning profile without matches."
+        )
         analysis_result.status = "MATCHING_FAILED"
         analysis_result.trial_matches = TrialMatchResult(
             final_recommendations="",
@@ -251,7 +303,7 @@ async def _run_matching_if_possible(
 
 
 # -----------------------------------------------------------
-# HEALTH CHECK ENDPOINT
+# HEALTH CHECK
 # -----------------------------------------------------------
 
 @app.get(
@@ -281,18 +333,23 @@ async def health_check():
     tags=["Profile"],
     summary="Analyze patient PDF and match clinical trials",
 )
-async def analyze_patient_document(file: UploadFile = File(...)):
+async def analyze_patient_document(
+    file: UploadFile = File(...)
+):
     """
     Full pipeline:
         1. Validate PDF upload
         2. Extract text via PyMuPDF
         3. Extract PatientProfile via LLM (Groq + Instructor)
         4. Normalize profile fields
-        5. Evaluate completeness and suggest missing details
+        5. Evaluate completeness + suggest missing details
         6. Run trial matching if cancer_type is available
         7. Return ProfileAnalysisResponse
     """
-    if not file.filename or not file.filename.lower().endswith(".pdf"):
+    if (
+        not file.filename
+        or not file.filename.lower().endswith(".pdf")
+    ):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Unsupported file type. Please upload a PDF.",
@@ -321,12 +378,16 @@ async def analyze_patient_document(file: UploadFile = File(...)):
         if not extracted_text.strip():
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="No readable text found. Ensure the PDF is not a scanned image.",
+                detail=(
+                    "No readable text found. "
+                    "Ensure the PDF is not a scanned image."
+                ),
             )
 
         if len(extracted_text) > MAX_EXTRACTED_TEXT_CHARS:
             logger.warning(
-                "Extracted text too long (%d chars). Truncating to %d chars.",
+                "Extracted text too long (%d chars). "
+                "Truncating to %d chars.",
                 len(extracted_text),
                 MAX_EXTRACTED_TEXT_CHARS,
             )
@@ -344,7 +405,9 @@ async def analyze_patient_document(file: UploadFile = File(...)):
 
         logger.info("Normalizing patient profile...")
         try:
-            normalized_profile = normalize_patient_profile(extracted_profile)
+            normalized_profile = normalize_patient_profile(
+                extracted_profile
+            )
         except ValueError as ve:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -353,10 +416,12 @@ async def analyze_patient_document(file: UploadFile = File(...)):
         logger.info("Normalization complete.")
 
         logger.info("Auditing profile completeness...")
-        analysis_result = _build_profile_analysis_response(normalized_profile)
-
-        analysis_result = await _run_matching_if_possible(analysis_result)
-
+        analysis_result = _build_profile_analysis_response(
+            normalized_profile
+        )
+        analysis_result = await _run_matching_if_possible(
+            analysis_result
+        )
         return analysis_result
 
     except HTTPException:
@@ -373,6 +438,7 @@ async def analyze_patient_document(file: UploadFile = File(...)):
 
 # -----------------------------------------------------------
 # MANUAL PROFILE ENDPOINT
+# Single clean endpoint — no duplicate
 # -----------------------------------------------------------
 
 @app.post(
@@ -380,31 +446,48 @@ async def analyze_patient_document(file: UploadFile = File(...)):
     response_model=ProfileAnalysisResponse,
     status_code=status.HTTP_200_OK,
     tags=["Profile"],
-    summary="Submit patient details manually and match clinical trials",
+    summary="Submit patient details manually and match trials",
 )
-async def analyze_manual_profile(request: ManualProfileRequest):
+async def analyze_manual_profile(
+    request: ManualProfileRequest,
+) -> ProfileAnalysisResponse:
     """
     Manual profile pipeline:
-        1. Accept structured patient profile
+        1. Accept ManualProfileRequest JSON body
         2. Normalize profile fields
-        3. Evaluate completeness and suggest missing details
+        3. Evaluate completeness + suggest missing details
         4. Run trial matching if cancer_type is available
         5. Return ProfileAnalysisResponse
+
+    ManualProfileRequest wraps PatientProfile so the
+    JSON body is:
+        { "profile": { "age": 62, "cancer_type": "..." } }
     """
     try:
-        logger.info("Received manual patient profile submission.")
+        logger.info(
+            "Manual profile received | cancer_type=%s | age=%s",
+            request.profile.cancer_type,
+            request.profile.age,
+        )
 
+        # Normalize
         try:
-            normalized_profile = normalize_patient_profile(request.profile)
+            normalized_profile = normalize_patient_profile(
+                request.profile
+            )
         except ValueError as ve:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=str(ve),
             )
 
-        analysis_result = _build_profile_analysis_response(normalized_profile)
-        analysis_result = await _run_matching_if_possible(analysis_result)
-
+        # Build response + run matching
+        analysis_result = _build_profile_analysis_response(
+            normalized_profile
+        )
+        analysis_result = await _run_matching_if_possible(
+            analysis_result
+        )
         return analysis_result
 
     except HTTPException:
@@ -464,7 +547,9 @@ async def chat_with_agent(request: ChatRequest):
 async def clear_chat_session(session_id: str):
     """Clears conversation history for a given session."""
     await _chat_agent.clear_session(session_id)
-    return {"message": f"Session {session_id} cleared successfully."}
+    return {
+        "message": f"Session {session_id} cleared successfully."
+    }
 
 
 @app.get(
@@ -476,4 +561,53 @@ async def clear_chat_session(session_id: str):
 async def get_chat_history(session_id: str):
     """Returns full conversation history for a session."""
     history = await _chat_agent.get_history(session_id)
-    return {"session_id": session_id, "history": history}
+    return {
+        "session_id": session_id,
+        "history": history,
+    }
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(
+    request: Request,
+    exc: RequestValidationError,
+) -> JSONResponse:
+    """
+    Catches Pydantic 422 validation errors and returns
+    clean, JSON-serializable field-level error messages.
+
+    Strips non-serializable objects (like ValueError)
+    from the ctx dict before returning.
+    """
+    # ── Sanitize errors — strip non-serializable ctx values ──
+    clean_errors = []
+    for error in exc.errors():
+        clean_error = {
+            "type":  error.get("type", ""),
+            "loc":   list(error.get("loc", [])),
+            "msg":   error.get("msg", ""),
+            "input": str(error.get("input", "")),
+            # ✅ Convert ctx.error to string — NOT the object
+            "ctx": {
+                k: str(v)
+                for k, v in (error.get("ctx") or {}).items()
+            } if error.get("ctx") else {},
+        }
+        clean_errors.append(clean_error)
+
+    logger.error(
+        "422 Validation Error | url=%s | errors=%s",
+        request.url,
+        clean_errors,
+    )
+
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": clean_errors,
+            "hint": (
+                "Check that all required fields are correct types. "
+                "Age must be an integer between 1 and 120. "
+                "Empty optional fields must be null not empty string."
+            ),
+        },
+    )
